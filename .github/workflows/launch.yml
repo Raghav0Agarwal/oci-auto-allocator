@@ -15,23 +15,21 @@ jobs:
           bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
           echo "/home/runner/bin" >> $GITHUB_PATH
 
-      - name: Configure OCI CLI & SSH
+      - name: Configure OCI CLI & Generate Clean SSH Key
         env:
           OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
           OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
           OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
           OCI_REGION: ${{ secrets.OCI_REGION }}
-          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
           SUPPRESS_LABEL_WARNING: "True"
         run: |
           mkdir -p ~/.oci
           echo "$OCI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
 
-          # Clean and format SSH key into a strict single-line OpenSSH format
-          CLEAN_SSH=$(echo "$SSH_PUBLIC_KEY" | tr -d '\r' | awk '{$1=$1};1' | tr '\n' ' ' | sed 's/  */ /g')
-          echo "$CLEAN_SSH" > ~/.oci/ssh-key.pub
+          # Generate a single-line OpenSSH public key directly from your validated private key
+          ssh-keygen -y -f ~/.oci/oci_api_key.pem > ~/.oci/ssh-key.pub
           chmod 644 ~/.oci/ssh-key.pub
 
           # Sanitize OCI config credentials
@@ -65,9 +63,14 @@ jobs:
           SHAPE_CONFIG='{"ocpus":2,"memoryInGBs":12}'
           INSTANCE_NAME="Kage"
 
+          echo "=================================================="
+          echo " Starting allocation loop for instance: $INSTANCE_NAME"
+          echo " Shape: 2 OCPU / 12 GB RAM | Region: ap-mumbai-1"
+          echo "=================================================="
+
           for attempt in 1 2 3; do
-            CURRENT_TIME=$(date '+%H:%M:%S')
-            echo "[$CURRENT_TIME] Attempt $attempt: Requesting '$INSTANCE_NAME'..."
+            CURRENT_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+            echo -n "[Attempt $attempt - $CURRENT_TIME] Requesting '$INSTANCE_NAME'... "
 
             OUTPUT=$(oci compute instance launch \
               --no-retry \
@@ -83,7 +86,10 @@ jobs:
             STATUS=$?
 
             if [ $STATUS -eq 0 ]; then
-              echo "SUCCESS! Instance created!"
+              echo ""
+              echo "=================================================="
+              echo " SUCCESS! Instance '$INSTANCE_NAME' provisioned!"
+              echo "=================================================="
               echo "$OUTPUT"
 
               # Send Telegram alert ONLY on success
@@ -98,12 +104,12 @@ jobs:
             fi
 
             if echo "$OUTPUT" | grep -qi "Too many requests"; then
-              echo "[$CURRENT_TIME] Rate limited (429). Waiting 90s..."
+              echo "Rate limited (429). Waiting 90s..."
             elif echo "$OUTPUT" | grep -qi "capacity"; then
-              echo "[$CURRENT_TIME] Host capacity full in Mumbai. Waiting 90s..."
+              echo "Host capacity full in Mumbai. Waiting 90s..."
             else
               ERR=$(echo "$OUTPUT" | grep -o '"message": "[^"]*' | head -n 1 | cut -d'"' -f4)
-              echo "[$CURRENT_TIME] API Error: ${ERR:-$OUTPUT}"
+              echo "API Error: ${ERR:-$OUTPUT}"
             fi
 
             if [ $attempt -lt 3 ]; then

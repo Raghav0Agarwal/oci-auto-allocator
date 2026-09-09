@@ -2,7 +2,8 @@ name: OCI Instance Allocation Loop
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    # Triggers a fresh 6-hour cycle automatically
+    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -12,6 +13,7 @@ permissions:
 jobs:
   check-and-launch:
     runs-on: ubuntu-latest
+    timeout-minutes: 360 # GitHub hard limit is 6 hours
     steps:
       - name: Install OCI CLI
         run: |
@@ -31,9 +33,11 @@ jobs:
           echo "$OCI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
 
+          # Generate clean OpenSSH public key directly from private key
           ssh-keygen -y -f ~/.oci/oci_api_key.pem > ~/.oci/ssh-key.pub
           chmod 644 ~/.oci/ssh-key.pub
 
+          # Sanitize OCI config credentials
           USER_CLEAN=$(echo "$OCI_USER_OCID" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
           TENANCY_CLEAN=$(echo "$OCI_TENANCY_OCID" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
           FP_CLEAN=$(echo "$OCI_FINGERPRINT" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^fingerprint=//I')
@@ -49,7 +53,7 @@ jobs:
           EOF
           chmod 600 ~/.oci/config
 
-      - name: Attempt Provisioning & Send Logs to Telegram
+      - name: Continuous Allocation Loop
         env:
           AD: ${{ secrets.AVAILABILITY_DOMAIN }}
           TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
@@ -75,11 +79,25 @@ jobs:
             fi
           }
 
-          send_tg "🚀 Starting check batch for '$INSTANCE_NAME' in ap-mumbai-1..."
+          send_tg "🚀 Starting 6-hour continuous allocation loop for '$INSTANCE_NAME' in ap-mumbai-1..."
 
-          for attempt in 1 2 3; do
-            CURRENT_TIME=$(date '+%H:%M:%S')
-            echo -n "[Attempt $attempt - $CURRENT_TIME] Requesting '$INSTANCE_NAME'... "
+          START_TIME=$(date +%s)
+          MAX_RUNTIME=20700 # 5 hours 45 minutes (safely exits before GitHub kills the job at 6h)
+          ATTEMPT=0
+
+          while true; do
+            CURRENT_TIMESTAMP=$(date +%s)
+            ELAPSED=$((CURRENT_TIMESTAMP - START_TIME))
+
+            # Exit cleanly before the 6-hour runner limit so the next cron starts fresh
+            if [ $ELAPSED -ge $MAX_RUNTIME ]; then
+              send_tg "🔄 Session reached 5h45m ($ATTEMPT checks completed). Handoff to next scheduled run."
+              exit 0
+            fi
+
+            ATTEMPT=$((ATTEMPT + 1))
+            NOW=$(date '+%H:%M:%S')
+            echo -n "[$NOW - Attempt $ATTEMPT] Requesting '$INSTANCE_NAME'... "
 
             OUTPUT=$(oci compute instance launch \
               --no-retry \
@@ -96,31 +114,27 @@ jobs:
 
             if [ $STATUS -eq 0 ]; then
               echo "SUCCESS! Instance created!"
-              send_tg "🎉 SUCCESS! Instance '${INSTANCE_NAME}' (2 OCPU / 12 GB RAM) has been provisioned in Mumbai! Check your Oracle Cloud Console."
+              send_tg "🎉 SUCCESS! Instance '${INSTANCE_NAME}' (2 OCPU / 12 GB RAM) has been provisioned in Mumbai! Disabling workflow automatically."
+
+              # Automatically disables the workflow so no future cron runs fire
+              gh workflow disable launch.yml --repo "$REPO" || true
+
               exit 0
             fi
 
             if echo "$OUTPUT" | grep -qi "Too many requests"; then
               echo "Rate limited (429). Waiting 90s..."
-              send_tg "⚠️ [$CURRENT_TIME] Attempt $attempt: Rate limited (429). Backing off 90s..."
             elif echo "$OUTPUT" | grep -qi "capacity"; then
               echo "Host capacity full in Mumbai. Waiting 90s..."
-              send_tg "⏳ [$CURRENT_TIME] Attempt $attempt: Host capacity full in Mumbai."
             else
               ERR=$(echo "$OUTPUT" | grep -o '"message": "[^"]*' | head -n 1 | cut -d'"' -f4)
-              DETAIL="${ERR:-$OUTPUT}"
-              echo "API Error: $DETAIL"
-              send_tg "❌ [$CURRENT_TIME] Attempt $attempt Error: $DETAIL"
+              echo "API Error: ${ERR:-$OUTPUT}"
             fi
 
-            if [ $attempt -lt 3 ]; then
-              sleep 90
+            # Status ping sent to Telegram every 20 attempts (~30 minutes)
+            if [ $((ATTEMPT % 20)) -eq 0 ]; then
+              send_tg "⏳ Status Check: $ATTEMPT attempts executed. Still waiting for host capacity in Mumbai..."
             fi
+
+            sleep 90
           done
-
-          send_tg "🏁 Batch complete. Triggering next cycle automatically..."
-
-          # Sleep 60 seconds, then re-trigger the workflow immediately via GitHub CLI
-          sleep 60
-          gh workflow run launch.yml --repo "$REPO" || true
-          exit 0

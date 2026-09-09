@@ -48,23 +48,26 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
+          set +e
+
           SHAPE_CONFIG='{"ocpus":2,"memoryInGBs":12}'
           INSTANCE_NAME="Kage"
 
           send_tg() {
             local msg="$1"
-            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-              -d "chat_id=${TG_CHAT_ID}" \
-              -d "text=${msg}" \
-              -d "parse_mode=Markdown" > /dev/null
+            if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                -d "chat_id=${TG_CHAT_ID}" \
+                --data-urlencode "text=${msg}" > /dev/null || true
+            fi
           }
 
-          send_tg "🚀 *OCI Allocation Check Started* (${INSTANCE_NAME} - Mumbai)"
+          send_tg "OCI Allocation Check Started (${INSTANCE_NAME} - Mumbai)"
 
           for attempt in 1 2 3; do
             CURRENT_TIME=$(date '+%H:%M:%S')
-            echo -n "[$CURRENT_TIME] Attempt $attempt: Requesting '$INSTANCE_NAME'... "
-            
+            echo "[${CURRENT_TIME}] Attempt ${attempt}: Requesting '${INSTANCE_NAME}'..."
+
             OUTPUT=$(oci compute instance launch \
               --no-retry \
               --availability-domain "$AD" \
@@ -78,30 +81,32 @@ jobs:
               --display-name "$INSTANCE_NAME" 2>&1)
             STATUS=$?
 
+            echo "Response: $OUTPUT"
+
             if [ $STATUS -eq 0 ]; then
               echo "SUCCESS! Instance created!"
-              send_tg "🎉 *SUCCESS! Instance '${INSTANCE_NAME}' created in Mumbai!* Check Oracle Cloud Console immediately."
+              send_tg "SUCCESS! Instance '${INSTANCE_NAME}' created in Mumbai! Check Oracle Cloud Console immediately."
               exit 0
             fi
 
             if echo "$OUTPUT" | grep -qi "Too many requests"; then
-              LOG_MSG="[$CURRENT_TIME] Attempt $attempt: Rate limited (429). Waiting 90s..."
               echo "Rate limited (429)."
-              send_tg "⚠️ *Rate Limited (429)* on attempt $attempt"
+              send_tg "Rate Limited (429) on attempt ${attempt} (${CURRENT_TIME})"
             elif echo "$OUTPUT" | grep -qi "capacity"; then
-              LOG_MSG="[$CURRENT_TIME] Attempt $attempt: Host capacity full in Mumbai."
-              echo "Host capacity full."
-              send_tg "⏳ *Capacity Full* - Attempt $attempt ($CURRENT_TIME)"
+              echo "Host capacity full in Mumbai."
+              send_tg "Capacity Full - Attempt ${attempt} (${CURRENT_TIME})"
             else
               ERR=$(echo "$OUTPUT" | grep -o '"message": "[^"]*' | head -n 1 | cut -d'"' -f4)
               DETAIL="${ERR:-$OUTPUT}"
-              echo "API Response: $DETAIL"
-              send_tg "❌ *API Error* on attempt $attempt: \`$DETAIL\`"
+              echo "API Error: $DETAIL"
+              send_tg "API Error on attempt ${attempt}: ${DETAIL}"
             fi
 
             if [ $attempt -lt 3 ]; then
+              echo "Sleeping 90 seconds..."
               sleep 90
             fi
           done
 
-          send_tg "🏁 *Batch complete.* Sleeping until next cron run."
+          send_tg "Batch complete. Sleeping until next cron run."
+          exit 0

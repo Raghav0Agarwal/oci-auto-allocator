@@ -1,0 +1,107 @@
+name: OCI Instance Allocation Loop
+
+on:
+  schedule:
+    # Runs every 10 minutes
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check-and-launch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install OCI CLI
+        run: |
+          bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
+          echo "/home/runner/bin" >> $GITHUB_PATH
+
+      - name: Configure OCI CLI & SSH
+        env:
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          mkdir -p ~/.oci
+          echo "$OCI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          echo "$SSH_PUBLIC_KEY" > ~/.oci/ssh-key.pub
+
+          cat << EOF > ~/.oci/config
+          [DEFAULT]
+          user=${OCI_USER_OCID}
+          fingerprint=${OCI_FINGERPRINT}
+          tenancy=${OCI_TENANCY_OCID}
+          region=${OCI_REGION}
+          key_file=/home/runner/.oci/oci_api_key.pem
+          EOF
+          chmod 600 ~/.oci/config
+
+      - name: Attempt Provisioning & Notify Telegram
+        env:
+          AD: ${{ secrets.AVAILABILITY_DOMAIN }}
+          TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
+          SUBNET: ${{ secrets.SUBNET_ID }}
+          IMAGE: ${{ secrets.IMAGE_ID }}
+          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          SHAPE_CONFIG='{"ocpus":2,"memoryInGBs":12}'
+          INSTANCE_NAME="Kage"
+
+          send_tg() {
+            local msg="$1"
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${TG_CHAT_ID}" \
+              -d "text=${msg}" \
+              -d "parse_mode=Markdown" > /dev/null
+          }
+
+          send_tg "🚀 *OCI Allocation Check Started* (${INSTANCE_NAME} - Mumbai)"
+
+          for attempt in 1 2 3; do
+            CURRENT_TIME=$(date '+%H:%M:%S')
+            echo -n "[$CURRENT_TIME] Attempt $attempt: Requesting '$INSTANCE_NAME'... "
+            
+            OUTPUT=$(oci compute instance launch \
+              --no-retry \
+              --availability-domain "$AD" \
+              --compartment-id "$TENANCY" \
+              --shape "VM.Standard.A1.Flex" \
+              --shape-config "$SHAPE_CONFIG" \
+              --image-id "$IMAGE" \
+              --subnet-id "$SUBNET" \
+              --assign-public-ip true \
+              --ssh-authorized-keys-file "/home/runner/.oci/ssh-key.pub" \
+              --display-name "$INSTANCE_NAME" 2>&1)
+            STATUS=$?
+
+            if [ $STATUS -eq 0 ]; then
+              echo "SUCCESS! Instance created!"
+              send_tg "🎉 *SUCCESS! Instance '${INSTANCE_NAME}' created in Mumbai!* Check Oracle Cloud Console immediately."
+              exit 0
+            fi
+
+            if echo "$OUTPUT" | grep -qi "Too many requests"; then
+              LOG_MSG="[$CURRENT_TIME] Attempt $attempt: Rate limited (429). Waiting 90s..."
+              echo "Rate limited (429)."
+              send_tg "⚠️ *Rate Limited (429)* on attempt $attempt"
+            elif echo "$OUTPUT" | grep -qi "capacity"; then
+              LOG_MSG="[$CURRENT_TIME] Attempt $attempt: Host capacity full in Mumbai."
+              echo "Host capacity full."
+              send_tg "⏳ *Capacity Full* - Attempt $attempt ($CURRENT_TIME)"
+            else
+              ERR=$(echo "$OUTPUT" | grep -o '"message": "[^"]*' | head -n 1 | cut -d'"' -f4)
+              DETAIL="${ERR:-$OUTPUT}"
+              echo "API Response: $DETAIL"
+              send_tg "❌ *API Error* on attempt $attempt: \`$DETAIL\`"
+            fi
+
+            if [ $attempt -lt 3 ]; then
+              sleep 90
+            fi
+          done
+
+          send_tg "🏁 *Batch complete.* Sleeping until next cron run."

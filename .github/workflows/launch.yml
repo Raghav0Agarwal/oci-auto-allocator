@@ -28,7 +28,7 @@ jobs:
           echo "$OCI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
 
-          # Generate a single-line OpenSSH public key directly from your validated private key
+          # Automatically generate a clean OpenSSH public key directly from your private key
           ssh-keygen -y -f ~/.oci/oci_api_key.pem > ~/.oci/ssh-key.pub
           chmod 644 ~/.oci/ssh-key.pub
 
@@ -48,7 +48,7 @@ jobs:
           EOF
           chmod 600 ~/.oci/config
 
-      - name: Attempt Provisioning
+      - name: Attempt Provisioning & Send Logs to Telegram
         env:
           AD: ${{ secrets.AVAILABILITY_DOMAIN }}
           TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
@@ -63,13 +63,19 @@ jobs:
           SHAPE_CONFIG='{"ocpus":2,"memoryInGBs":12}'
           INSTANCE_NAME="Kage"
 
-          echo "=================================================="
-          echo " Starting allocation loop for instance: $INSTANCE_NAME"
-          echo " Shape: 2 OCPU / 12 GB RAM | Region: ap-mumbai-1"
-          echo "=================================================="
+          send_tg() {
+            local msg="$1"
+            if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                -d "chat_id=${TG_CHAT_ID}" \
+                --data-urlencode "text=${msg}" > /dev/null || true
+            fi
+          }
+
+          send_tg "🚀 Starting check batch for '$INSTANCE_NAME' in ap-mumbai-1..."
 
           for attempt in 1 2 3; do
-            CURRENT_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+            CURRENT_TIME=$(date '+%H:%M:%S')
             echo -n "[Attempt $attempt - $CURRENT_TIME] Requesting '$INSTANCE_NAME'... "
 
             OUTPUT=$(oci compute instance launch \
@@ -86,30 +92,22 @@ jobs:
             STATUS=$?
 
             if [ $STATUS -eq 0 ]; then
-              echo ""
-              echo "=================================================="
-              echo " SUCCESS! Instance '$INSTANCE_NAME' provisioned!"
-              echo "=================================================="
-              echo "$OUTPUT"
-
-              # Send Telegram alert ONLY on success
-              if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
-                MSG="🎉 SUCCESS! Instance '${INSTANCE_NAME}' (2 OCPU / 12 GB RAM) has been provisioned in Mumbai! Check your Oracle Cloud Console."
-                curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-                  -d "chat_id=${TG_CHAT_ID}" \
-                  --data-urlencode "text=${MSG}" > /dev/null || true
-              fi
-
+              echo "SUCCESS! Instance created!"
+              send_tg "🎉 SUCCESS! Instance '${INSTANCE_NAME}' (2 OCPU / 12 GB RAM) has been provisioned in Mumbai! Check your Oracle Cloud Console."
               exit 0
             fi
 
             if echo "$OUTPUT" | grep -qi "Too many requests"; then
               echo "Rate limited (429). Waiting 90s..."
+              send_tg "⚠️ [$CURRENT_TIME] Attempt $attempt: Rate limited (429). Backing off 90s..."
             elif echo "$OUTPUT" | grep -qi "capacity"; then
               echo "Host capacity full in Mumbai. Waiting 90s..."
+              send_tg "⏳ [$CURRENT_TIME] Attempt $attempt: Host capacity full in Mumbai."
             else
               ERR=$(echo "$OUTPUT" | grep -o '"message": "[^"]*' | head -n 1 | cut -d'"' -f4)
-              echo "API Error: ${ERR:-$OUTPUT}"
+              DETAIL="${ERR:-$OUTPUT}"
+              echo "API Error: $DETAIL"
+              send_tg "❌ [$CURRENT_TIME] Attempt $attempt Error: $DETAIL"
             fi
 
             if [ $attempt -lt 3 ]; then
@@ -117,4 +115,5 @@ jobs:
             fi
           done
 
+          send_tg "🏁 Batch complete (3/3 attempts finished). Sleeping until next cron run."
           exit 0

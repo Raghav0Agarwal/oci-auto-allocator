@@ -129,7 +129,7 @@ jobs:
               sleep 90
               continue
             elif echo "$OUTPUT" | grep -qi "capacity"; then
-              echo "Host capacity full in Mumbai. Waiting 30s..."
+              echo "Host capacity full in Mumbai. Waiting 60s..."
             else
               ERR=$(echo "$OUTPUT" | grep -o '"message": "[^"]*' | head -n 1 | cut -d'"' -f4)
               echo "API Error: ${ERR:-$OUTPUT}"
@@ -140,5 +140,5 @@ jobs:
               send_tg "⏳ Status Check: $ATTEMPT attempts completed. Still polling capacity in Mumbai..."
             fi
 
-            sleep 30
+            sleep 60
           done

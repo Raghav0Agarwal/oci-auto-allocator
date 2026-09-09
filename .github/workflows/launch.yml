@@ -2,7 +2,7 @@ name: OCI Instance Allocation Loop
 
 on:
   schedule:
-    # Triggers a fresh 6-hour cycle automatically
+    # Safety net: starts a run every 6 hours if a chain ever gets dropped
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
@@ -13,7 +13,7 @@ permissions:
 jobs:
   check-and-launch:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # GitHub hard limit is 6 hours
+    timeout-minutes: 360 # GitHub maximum limit is 6 hours
     steps:
       - name: Install OCI CLI
         run: |
@@ -79,19 +79,21 @@ jobs:
             fi
           }
 
-          send_tg "🚀 Starting 6-hour continuous allocation loop for '$INSTANCE_NAME' in ap-mumbai-1..."
+          send_tg "🚀 Starting 6-hour continuous allocation loop for '$INSTANCE_NAME' in ap-mumbai-1 (30s interval)..."
 
           START_TIME=$(date +%s)
-          MAX_RUNTIME=20700 # 5 hours 45 minutes (safely exits before GitHub kills the job at 6h)
+          MAX_RUNTIME=20700 # 5 hours 45 minutes
           ATTEMPT=0
 
           while true; do
             CURRENT_TIMESTAMP=$(date +%s)
             ELAPSED=$((CURRENT_TIMESTAMP - START_TIME))
 
-            # Exit cleanly before the 6-hour runner limit so the next cron starts fresh
+            # When 5h45m is reached, wait 30s, trigger next session immediately, and exit
             if [ $ELAPSED -ge $MAX_RUNTIME ]; then
-              send_tg "🔄 Session reached 5h45m ($ATTEMPT checks completed). Handoff to next scheduled run."
+              send_tg "🔄 Completed 5h45m loop ($ATTEMPT checks). Resting 30s and starting next session..."
+              sleep 30
+              gh workflow run launch.yml --repo "$REPO" || true
               exit 0
             fi
 
@@ -116,25 +118,27 @@ jobs:
               echo "SUCCESS! Instance created!"
               send_tg "🎉 SUCCESS! Instance '${INSTANCE_NAME}' (2 OCPU / 12 GB RAM) has been provisioned in Mumbai! Disabling workflow automatically."
 
-              # Automatically disables the workflow so no future cron runs fire
+              # Automatically disable this workflow so no more runs execute
               gh workflow disable launch.yml --repo "$REPO" || true
-
               exit 0
             fi
 
             if echo "$OUTPUT" | grep -qi "Too many requests"; then
-              echo "Rate limited (429). Waiting 90s..."
+              echo "Rate limited (429). Waiting 90s cooldown..."
+              send_tg "⚠️ [$NOW] Attempt $ATTEMPT: Rate limited (429). Backing off 90s..."
+              sleep 90
+              continue
             elif echo "$OUTPUT" | grep -qi "capacity"; then
-              echo "Host capacity full in Mumbai. Waiting 90s..."
+              echo "Host capacity full in Mumbai. Waiting 30s..."
             else
               ERR=$(echo "$OUTPUT" | grep -o '"message": "[^"]*' | head -n 1 | cut -d'"' -f4)
               echo "API Error: ${ERR:-$OUTPUT}"
             fi
 
-            # Status ping sent to Telegram every 20 attempts (~30 minutes)
-            if [ $((ATTEMPT % 20)) -eq 0 ]; then
-              send_tg "⏳ Status Check: $ATTEMPT attempts executed. Still waiting for host capacity in Mumbai..."
+            # Status ping sent to Telegram every 60 attempts (~30 minutes)
+            if [ $((ATTEMPT % 60)) -eq 0 ]; then
+              send_tg "⏳ Status Check: $ATTEMPT attempts completed. Still polling capacity in Mumbai..."
             fi
 
-            sleep 90
+            sleep 30
           done

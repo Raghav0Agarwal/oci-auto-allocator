@@ -2,9 +2,12 @@ name: OCI Instance Allocation Loop
 
 on:
   schedule:
-    # Runs every 10 minutes
     - cron: '*/10 * * * *'
   workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
   check-and-launch:
@@ -28,11 +31,9 @@ jobs:
           echo "$OCI_KEY_CONTENT" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
 
-          # Automatically generate a clean OpenSSH public key directly from your private key
           ssh-keygen -y -f ~/.oci/oci_api_key.pem > ~/.oci/ssh-key.pub
           chmod 644 ~/.oci/ssh-key.pub
 
-          # Sanitize OCI config credentials
           USER_CLEAN=$(echo "$OCI_USER_OCID" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
           TENANCY_CLEAN=$(echo "$OCI_TENANCY_OCID" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
           FP_CLEAN=$(echo "$OCI_FINGERPRINT" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^fingerprint=//I')
@@ -56,6 +57,8 @@ jobs:
           IMAGE: ${{ secrets.IMAGE_ID }}
           TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           SUPPRESS_LABEL_WARNING: "True"
         run: |
           set +e
@@ -115,5 +118,9 @@ jobs:
             fi
           done
 
-          send_tg "🏁 Batch complete (3/3 attempts finished). Sleeping until next cron run."
+          send_tg "🏁 Batch complete. Triggering next cycle automatically..."
+
+          # Sleep 60 seconds, then re-trigger the workflow immediately via GitHub CLI
+          sleep 60
+          gh workflow run launch.yml --repo "$REPO" || true
           exit 0

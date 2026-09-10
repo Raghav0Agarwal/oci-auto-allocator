@@ -81,7 +81,7 @@ jobs:
             fi
           }
 
-          send_tg "🚀 Starting session for '$INSTANCE_NAME' in ap-mumbai-1 (Safe 60s pace, Single Runner Mode)..."
+          send_tg "🚀 Starting session for '$INSTANCE_NAME' in ap-mumbai-1 (Rock-solid 90s pace, Single Runner)..."
 
           START_TIME=$(date +%s)
           MAX_RUNTIME=20700 # 5 hours 45 minutes
@@ -126,22 +126,22 @@ jobs:
             fi
 
             if echo "$OUTPUT" | grep -qi "Too many requests"; then
-              echo "Rate limited (429). Backing off 90s..."
-              send_tg "⚠️ [$NOW] Attempt $ATTEMPT: Rate limited (429). Backing off 90s..."
-              sleep 90
+              echo "Rate limited (429). Backing off 120s..."
+              send_tg "⚠️ [$NOW] Attempt $ATTEMPT: Rate limited (429). Backing off 120s..."
+              sleep 120
               continue
             elif echo "$OUTPUT" | grep -qi "capacity"; then
-              echo "Host capacity full in Mumbai. Waiting 60s..."
+              echo "Host capacity full in Mumbai. Waiting 90s..."
             else
               ERR=$(echo "$OUTPUT" | grep -o '"message": "[^"]*' | head -n 1 | cut -d'"' -f4)
               echo "API Error: ${ERR:-$OUTPUT}"
             fi
 
-            # Heartbeat ping sent to Telegram every 30 attempts (~30 minutes)
-            if [ $((ATTEMPT % 30)) -eq 0 ]; then
-              send_tg "⏳ Status Check: $ATTEMPT attempts completed. Continuous checking active..."
+            # Heartbeat ping sent to Telegram every 20 attempts (~30 minutes)
+            if [ $((ATTEMPT % 20)) -eq 0 ]; then
+              send_tg "⏳ Status Check: $ATTEMPT attempts completed. Continuous 90s polling active..."
             fi
 
-            # Safe 60-second baseline between normal capacity checks
-            sleep 60
+            # Rock-solid 90-second baseline between normal capacity checks
+            sleep 90
           done
